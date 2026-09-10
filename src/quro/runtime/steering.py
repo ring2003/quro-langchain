@@ -43,6 +43,7 @@ from dataclasses import dataclass, field
 from typing import Any, Protocol, runtime_checkable
 
 from quro.runtime.base import IRuntimeBackend
+from quro.logging import is_dump_context_enabled
 
 
 class SteeringError(RuntimeError):
@@ -707,7 +708,16 @@ class Steering:
                 phase="", budget=0, principal="steering",
             ))
         coordinator = PromptCoordinator(hooks, principal="steering")
-        return coordinator.assemble()
+        system, user = coordinator.assemble()
+        if is_dump_context_enabled():
+            from quro.logging import dump_assembled_blocks
+            dump = dump_assembled_blocks(
+                blocks={**system, **user},
+            )
+            if dump:
+                import sys
+                print(f"[steering] {dump}", file=sys.stderr)
+        return system, user
 
 
 class SteeringLoop:

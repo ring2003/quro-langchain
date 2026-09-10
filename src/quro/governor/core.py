@@ -20,6 +20,7 @@ from typing import Any, Protocol
 from quro.core.resources import IResourceStore
 from quro.core.domain.phase_ops import terminal_tool_for_phase
 from quro.core.tools.coordinator import IToolCoordinator
+from quro.logging import is_dump_context_enabled
 from quro.context.coordinator import (
     NextInstructionBlockHook,
     ObjectiveBlockHook,
@@ -958,7 +959,15 @@ class ExecutionGovernor:
             coordinator_kwargs["acl_principal"] = principal_from_state(state)
             coordinator_kwargs["resolver"] = DomainStateResolver(state)
         coordinator = PromptCoordinator(hooks, **coordinator_kwargs)
-        return coordinator.assemble()
+        system_blocks, user_blocks = coordinator.assemble()
+        if is_dump_context_enabled():
+            from quro.logging import dump_assembled_blocks
+            dump = dump_assembled_blocks(
+                blocks={**system_blocks, **user_blocks},
+            )
+            if dump:
+                print(f"[governor] {dump}", file=sys.stderr)
+        return system_blocks, user_blocks
 
     def _render_user_view(self, state: dict[str, Any], phase: str) -> str:
         """Render only the user view (for event-driven state injection)."""

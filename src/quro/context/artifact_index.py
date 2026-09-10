@@ -217,6 +217,53 @@ def build_artifact_index(
     return view
 
 
+def build_global_artifact_index(
+    artifact_dicts: list[dict[str, Any]],
+) -> ArtifactIndexView:
+    """Build the MetaPlanner / orchestrator-wide artifact projection.
+
+    ``build_artifact_index`` is scoped to a single step-instance principal:
+    it splits artifacts into *own* and ACL-granted *dependency*.  The
+    MetaPlanner sits *above* the steps — it legitimately sees every artifact
+    across all rounds and steps, so ownership and ACL grants do not apply.
+
+    This is the same canonical :class:`ArtifactIndexView` record shape the
+    step agents consume (same ``ArtifactEntry`` projection via ``_entry``),
+    with all artifacts read-granted.  It keeps "one semantic view, multiple
+    prompt consumers" — the consumer differs (an orchestrator vs a step), not
+    the artifact record semantics.
+
+    Args:
+        artifact_dicts: The raw artifact dicts (each with ``artifact_id``).
+
+    Returns:
+        An :class:`ArtifactIndexView` containing every dict as an entry
+        (de-duplicated by id, stable order).
+    """
+    seen: set[str] = set()
+    entries: list[ArtifactEntry] = []
+    for a in artifact_dicts:
+        aid = a.get("artifact_id") or a.get("id")
+        if not aid or aid in seen:
+            continue
+        seen.add(aid)
+        entries.append(_entry(a))
+
+    by_kind: dict[str, list[ArtifactEntry]] = {}
+    for e in entries:
+        by_kind.setdefault(e.kind, []).append(e)
+
+    index = ArtifactIndex(artifacts=entries, artifacts_by_kind=by_kind)
+    view = ArtifactIndexView(
+        index=index,
+        principal_id="__meta_planner__",
+        artifact_count=len(entries),
+        dep_artifact_ids=[e.id for e in entries],
+    )
+    _attach_owner(view)
+    return view
+
+
 def _entry(a: dict[str, Any]) -> ArtifactEntry:
     evidences = a.get("evidences")
     if isinstance(evidences, list):

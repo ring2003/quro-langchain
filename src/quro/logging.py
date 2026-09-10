@@ -87,6 +87,17 @@ def is_debug_enabled() -> bool:
     return logging.getLogger("quro").isEnabledFor(logging.DEBUG)
 
 
+def is_dump_context_enabled() -> bool:
+    """True when assembled prompt blocks should be dumped to stderr.
+
+    Active when either ``QURO_DEBUG`` or ``QURO_DUMP_CONTEXT`` is set.
+    """
+    if is_debug_enabled():
+        return True
+    import os
+    return os.environ.get("QURO_DUMP_CONTEXT") in ("1", "true", "True", "yes")
+
+
 def dim(text: str) -> str:
     """Wrap *text* in a dim/grey ANSI escape for terminal output."""
     return f"{DIM}{text}{RESET}"

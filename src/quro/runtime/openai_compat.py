@@ -34,6 +34,14 @@ from quro.runtime.retry import retry_with_backoff, is_retriable, _error_descript
 MAX_TOOL_RESULT_CHARS = 8192  # rough approximation of 2048 tokens
 
 
+def _is_dump_context_enabled() -> bool:
+    """Check if context dumping is enabled (QURO_DEBUG or QURO_DUMP_CONTEXT)."""
+    import os
+    if os.environ.get("QURO_DEBUG") in ("1", "true", "True", "yes"):
+        return True
+    return os.environ.get("QURO_DUMP_CONTEXT") in ("1", "true", "True", "yes")
+
+
 # ---------------------------------------------------------------------------
 # Pure helpers (unit-testable without network)
 # ---------------------------------------------------------------------------
@@ -438,6 +446,11 @@ class OpenAICompatibleBackend:
                         result = f"Error executing {tc['name']}: {e}"
 
                 result_str = str(result)
+                if _is_dump_context_enabled():
+                    _preview = result_str[:500]
+                    if len(result_str) > 500:
+                        _preview += f"... ({len(result_str)} chars total)"
+                    print(f"{log_prefix}[Tool result] {_preview}")
                 if len(result_str) > MAX_TOOL_RESULT_CHARS:
                     preview = result_str[:200]
                     result = (

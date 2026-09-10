@@ -44,6 +44,8 @@ class Settings:
         QURO_RETRY_BACKOFF_BASE       (default: 1.0 — base backoff seconds for retries)
         QURO_YES                      (default: 0 — skip model-switch confirmation)
         QURO_DEBUG                    (default: 0 — enable debug mode)
+        QURO_DUMP_CONTEXT             (default: 0 — dump assembled prompt blocks
+                                      to stderr; independent of QURO_DEBUG)
         QURO_OVERRIDE                 (default: 0 — override MetaPlanner UNSAT
                                       (simulate continuation); requires QURO_DEBUG=1)
     """
@@ -73,6 +75,7 @@ class Settings:
         self._retry_backoff_base: float | None = None
         self._yes: bool | None = None
         self._debug: bool | None = None
+        self._dump_context: bool | None = None
         self._override: bool | None = None
 
     @property
@@ -278,6 +281,19 @@ class Settings:
             raw = os.getenv("QURO_DEBUG", "0")
             self._debug = raw == "1"
         return self._debug
+
+    @property
+    def dump_context(self) -> bool:
+        """Dump assembled prompt blocks to stderr (default: False).
+
+        Independent of ``debug`` — can be enabled on its own to see
+        exactly what context blocks reach the LLM without turning on
+        full debug logging.
+        """
+        if self._dump_context is None:
+            raw = os.getenv("QURO_DUMP_CONTEXT", "0")
+            self._dump_context = raw == "1"
+        return self._dump_context
 
     @property
     def override(self) -> bool:

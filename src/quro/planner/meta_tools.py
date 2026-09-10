@@ -13,6 +13,7 @@ define_method     PlannerDomain.register_method (HTN verify)  low
 build_pipeline    solve() + pef_to_pipeline() (HTN verify)    low
 run_pipeline      PipelineRunner.run() → summary (advisory)   medium
 get_artifact      Retrieves artifact content from last run     low
+list_artifacts    Lists all known artifact IDs from handoff     low
 recall_memory     IMemoryBridge.recall() / recall_patterns()  low
 record_decision   IMemoryBridge.distill(type="decision")      low
 commit_learning   IMemoryBridge.distill(type="procedural")    low
@@ -132,18 +133,23 @@ def _summarize_pipeline_result(
     goal_facts: list[str] | None = None,
     round_goal_facts: list[str] | None = None,
     goal_status_info: dict[str, Any] | None = None,
+    handoff_artifacts: dict[str, Any] | None = None,
 ) -> str:
     """Summarize a PipelineResult as a self-contained report for MetaPlanner.
 
-    The report includes step summaries, automatic goal evaluation (via
-    ``goal_status_from_results``), and a goal-status summary.
-    MetaPlanner only needs to read the report and decide — no need to
-    "remember intent" across the tool call boundary.
+    The report includes an ``## ARTIFACTS`` header (for grounding), step
+    summaries, automatic goal evaluation (via ``goal_status_from_results``),
+    and a goal-status summary.  MetaPlanner only needs to read the report
+    and decide — no need to "remember intent" across the tool call boundary.
 
     Report structure::
 
-        ### Step Summary (N/N OK)
-          - step_id: OK/FAILED — artifact description [art_xxx]
+        ## ARTIFACTS
+        art_a1b2c3d4  (step r1_survey)
+        ...
+
+        ## STEP SUMMARIES (N/N OK)
+          - step_id: OK/FAILED — artifact description
         ### Goal Status
           - goal_name: SAT/UNSAT — evidence
         ### Goal Status Summary: all-met | some-unmet | none-met
@@ -170,15 +176,52 @@ def _summarize_pipeline_result(
         else:
             step_results = {}
 
+    # -- Collect artifacts from current result and handoff --------------------
+    # Build an ordered map: artifact_id -> (step_id, summary)
+    artifact_rows: dict[str, tuple[str, str]] = {}
+    step_order = result.order or list(step_results.keys())
+    for step_id in step_order:
+        r = step_results.get(step_id)
+        if r is None:
+            continue
+        for a in (getattr(r, "artifacts", []) or []):
+            if isinstance(a, dict):
+                aid = a.get("artifact_id", "")
+                if aid and aid not in artifact_rows:
+                    summary = str(a.get("summary", ""))[:80]
+                    artifact_rows[aid] = (step_id, summary)
+
+    # Also include handoff artifacts not already present (prior rounds).
+    for aid, a in (handoff_artifacts or {}).items():
+        if aid not in artifact_rows:
+            step_id = ""
+            summary = ""
+            if isinstance(a, dict):
+                step_id = str(a.get("step_id", ""))
+                summary = str(a.get("summary", ""))[:80]
+            elif hasattr(a, "step_id"):
+                step_id = str(getattr(a, "step_id", ""))
+                summary = str(getattr(a, "summary", ""))[:80]
+            artifact_rows[aid] = (step_id, summary)
+
+    # -- ARTIFACTS header (front-loaded for grounding) -----------------------
+    if artifact_rows:
+        lines.append("")
+        lines.append("## ARTIFACTS")
+        for aid in sorted(artifact_rows):
+            sid, summ = artifact_rows[aid]
+            lines.append(f"{aid}  (step {sid})")
+
+    # -- Step Summary --------------------------------------------------------
     total = len(step_results)
     ok_count = sum(1 for r in step_results.values() if r.ok)
     failed_count = total - ok_count
 
+    lines.append("")
     lines.append(f"### Step Summary ({ok_count}/{total} OK)")
     if failed_count:
         lines.append(f"  ({failed_count} failed)")
 
-    step_order = result.order or list(step_results.keys())
     for step_id in step_order:
         r = step_results.get(step_id)
         if r is None:
@@ -189,22 +232,16 @@ def _summarize_pipeline_result(
             # Extract artifact summary.
             artifacts = getattr(r, "artifacts", []) or []
             summary_text = ""
-            art_ids: list[str] = []
             for a in artifacts:
-                if isinstance(a, dict):
-                    aid = a.get("artifact_id", "")
-                    if aid:
-                        art_ids.append(aid)
-                    if not summary_text:
-                        summary_text = str(a.get("summary", ""))[:120]
+                if isinstance(a, dict) and not summary_text:
+                    summary_text = str(a.get("summary", ""))[:120]
             if not summary_text:
                 metrics = getattr(r, "metrics", {}) or {}
                 summary_text = metrics.get("summary", "(no summary)")
             if not summary_text or summary_text == "(no summary)":
                 summary_text = "(OK — no artifact summary)"
 
-            art_str = f" [{', '.join(art_ids)}]" if art_ids else ""
-            lines.append(f"  - {step_id}: OK — {summary_text}{art_str}")
+            lines.append(f"  - {step_id}: OK — {summary_text}")
         else:
             error_msg = getattr(r, "error", "unknown error") or "unknown error"
             lines.append(f"  - {step_id}: FAILED — {error_msg[:200]}")
@@ -749,6 +786,7 @@ def make_meta_planner_tools(
             result,
             goal_facts=goal_facts,
             round_goal_facts=_round_goal_facts,
+            handoff_artifacts=getattr(handoff, "_artifacts", None) if handoff is not None else None,
         )
 
     # ------------------------------------------------------------------
@@ -1038,7 +1076,14 @@ def make_meta_planner_tools(
 
         art = handoff.resolve_artifact(artifact_id)
         if art is None:
-            return f"Error: artifact not found: {artifact_id}"
+            known = (
+                ", ".join(sorted(getattr(handoff, "_artifacts", {}))[:10])
+                or "(none yet)"
+            )
+            return (
+                f"Error: artifact not found: {artifact_id}. "
+                f"Known artifacts: {known}"
+            )
 
         record = {
             "artifact_id": artifact_id,
@@ -1047,6 +1092,43 @@ def make_meta_planner_tools(
             "body": str(getattr(art, "body", art))[:2000],
         }
         return json.dumps(record, indent=2, ensure_ascii=False)
+
+    # ------------------------------------------------------------------
+    # list_artifacts — discover all known artifact IDs
+    # ------------------------------------------------------------------
+    def list_artifacts() -> str:
+        """List all artifacts known to the cross-round handoff.
+
+        Returns a compact table of artifact IDs, their originating step,
+        kind, and summary so the MetaPlanner can resolve IDs without
+        guessing.
+        """
+        if handoff is None:
+            return (
+                "Error: no cross-round handoff configured. "
+                "Cannot list artifacts."
+            )
+
+        arts = getattr(handoff, "_artifacts", {})
+        if not arts:
+            return "No artifacts recorded yet."
+
+        rows: list[str] = ["id | step_id | kind | summary"]
+        for aid in sorted(arts):
+            a = arts[aid]
+            step_id = ""
+            kind = ""
+            summary = ""
+            if isinstance(a, dict):
+                step_id = str(a.get("step_id", ""))
+                kind = str(a.get("kind", ""))
+                summary = str(a.get("summary", ""))[:80]
+            elif hasattr(a, "step_id"):
+                step_id = str(getattr(a, "step_id", ""))
+                kind = str(getattr(a, "kind", ""))
+                summary = str(getattr(a, "summary", ""))[:80]
+            rows.append(f"{aid} | {step_id} | {kind} | {summary}")
+        return "\n".join(rows)
 
     # ------------------------------------------------------------------
     # submit_plan / stop — the structured plan/stop gate
@@ -1210,7 +1292,25 @@ def make_meta_planner_tools(
             return "Error: no manual steps created. Use create_step first."
 
         result = round_controller.execute()
-        return _summarize_pipeline_result(result)
+
+        # Carry produced artifacts into the cross-round handoff so a
+        # subsequent get_artifact resolves them (same resolution layer as
+        # run_pipeline's handoff carry).
+        if handoff is not None:
+            from quro.core.cross_round_handoff import carry_result_artifacts
+
+            round_idx = (
+                getattr(round_controller, "round_idx", 0)
+                if round_controller is not None else 0
+            )
+            carry_result_artifacts(handoff, round_idx, result)
+
+        return _summarize_pipeline_result(
+            result,
+            goal_facts=_goal_facts,
+            round_goal_facts=_round_goal_facts,
+            handoff_artifacts=getattr(handoff, "_artifacts", None) if handoff is not None else None,
+        )
 
     # ------------------------------------------------------------------
     # list_manual_steps — list manually created steps
@@ -1280,6 +1380,7 @@ def make_meta_planner_tools(
         StructuredTool.from_function(func=run_pipeline),
         StructuredTool.from_function(func=run_custom_pipeline),
         StructuredTool.from_function(func=get_artifact),
+        StructuredTool.from_function(func=list_artifacts),
         StructuredTool.from_function(func=recall_memory),
         StructuredTool.from_function(func=record_decision),
         StructuredTool.from_function(func=commit_learning),
